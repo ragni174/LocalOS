@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import Modal from '../components/Modal';
+import { api } from '../api/api';
 
 export default function Appointments() {
   const { 
@@ -42,37 +43,79 @@ export default function Appointments() {
     notes: ''
   });
 
-  const timeSlots = [
+  const timelineSlots = [
     '09:00 AM', '10:00 AM', '11:00 AM', '12:00 PM', 
     '01:00 PM', '02:00 PM', '03:00 PM', '04:00 PM', 
     '05:00 PM', '06:00 PM'
   ];
+
+  const [availableSlots, setAvailableSlots] = useState([]);
+  const [isLoadingSlots, setIsLoadingSlots] = useState(false);
+  const [bookingError, setBookingError] = useState(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  React.useEffect(() => {
+    if (isBookModalOpen && newBooking.date && newBooking.serviceId && newBooking.staffId) {
+      const fetchSlots = async () => {
+        setIsLoadingSlots(true);
+        try {
+          const res = await api.get(`/api/availability?date=${newBooking.date}&serviceId=${newBooking.serviceId}&staffId=${newBooking.staffId}`);
+          setAvailableSlots(res || []);
+          if (res && res.length > 0 && !res.includes(newBooking.time)) {
+             setNewBooking(prev => ({ ...prev, time: res[0] }));
+          }
+        } catch (err) {
+          setAvailableSlots([]);
+        } finally {
+          setIsLoadingSlots(false);
+        }
+      };
+      fetchSlots();
+    }
+  }, [isBookModalOpen, newBooking.date, newBooking.serviceId, newBooking.staffId]);
 
   const filteredAppointments = appointments.filter(apt => {
     const matchesStaff = selectedStaffFilter === 'ALL' || apt.staffId === selectedStaffFilter || apt.staffName.toLowerCase().includes(selectedStaffFilter.toLowerCase());
     return matchesStaff;
   });
 
-  const handleCreateBooking = (e) => {
+  const handleCreateBooking = async (e) => {
     e.preventDefault();
+    setIsSubmitting(true);
+    setBookingError(null);
     const service = services.find(s => s.id === newBooking.serviceId) || services[0];
     const provider = staff.find(s => s.id === newBooking.staffId) || staff[0];
 
-    addAppointment({
-      customerName: newBooking.customerName,
-      customerPhone: newBooking.customerPhone,
-      serviceName: service.name,
-      serviceId: service.id,
-      staffName: provider.name,
-      staffId: provider.id,
-      price: service.price,
-      duration: service.duration,
-      date: newBooking.date,
-      time: newBooking.time,
-      notes: newBooking.notes
-    });
-
-    setIsBookModalOpen(false);
+    try {
+      await addAppointment({
+        customerName: newBooking.customerName,
+        customerPhone: newBooking.customerPhone,
+        serviceName: service.name,
+        serviceId: service.id,
+        staffName: provider.name,
+        staffId: provider.id,
+        price: service.price,
+        duration: service.duration,
+        date: newBooking.date,
+        time: newBooking.time,
+        notes: newBooking.notes
+      });
+      setIsBookModalOpen(false);
+      setNewBooking({
+        customerName: '',
+        customerPhone: '',
+        serviceId: services[0]?.id || '',
+        staffId: staff[0]?.id || '',
+        date: new Date().toISOString().split('T')[0],
+        time: '11:00 AM',
+        notes: ''
+      });
+    } catch (err) {
+      console.error(err);
+      setBookingError(err.message || 'Failed to book appointment.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handlePrevDay = () => {
@@ -183,7 +226,7 @@ export default function Appointments() {
           </div>
 
           <div className="divide-y divide-gray-100">
-            {timeSlots.map(slot => {
+            {timelineSlots.map(slot => {
               const matchingApts = filteredAppointments.filter(a => a.time === slot);
               return (
                 <div key={slot} className="flex min-h-[85px] hover:bg-gray-50/40 transition-colors">
@@ -338,6 +381,11 @@ export default function Appointments() {
         subtitle="Reserve a chair and dispatch client SMS confirmation"
       >
         <form onSubmit={handleCreateBooking} className="space-y-4 text-xs">
+          {bookingError && (
+            <div className="bg-red-50 text-red-700 p-3 rounded-lg border border-red-200">
+              {bookingError}
+            </div>
+          )}
           <div>
             <label className="block font-medium text-gray-700 mb-1">Select Client or Enter Name *</label>
             <input
@@ -404,10 +452,17 @@ export default function Appointments() {
                 value={newBooking.time}
                 onChange={(e) => setNewBooking({ ...newBooking, time: e.target.value })}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none focus:border-emerald-500 bg-white"
+                disabled={isLoadingSlots || availableSlots.length === 0}
               >
-                {timeSlots.map(ts => (
-                  <option key={ts} value={ts}>{ts}</option>
-                ))}
+                {isLoadingSlots ? (
+                  <option value="">Loading slots...</option>
+                ) : availableSlots.length > 0 ? (
+                  availableSlots.map(ts => (
+                    <option key={ts} value={ts}>{ts}</option>
+                  ))
+                ) : (
+                  <option value="">No slots available</option>
+                )}
               </select>
             </div>
           </div>
@@ -433,7 +488,8 @@ export default function Appointments() {
             </button>
             <button
               type="submit"
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg shadow-xs"
+              disabled={isSubmitting || availableSlots.length === 0}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold rounded-lg shadow-xs"
             >
               Confirm & Book
             </button>

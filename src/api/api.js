@@ -25,3 +25,9 @@ export const api = {
   put: (endpoint, data) => request(endpoint, { method: 'PUT', body: JSON.stringify(data) }),
   delete: (endpoint) => request(endpoint, { method: 'DELETE' }),
 };
+
+export const auth = {
+  login: (credentials) => api.post('/api/auth/login', credentials),
+  logout: () => api.post('/api/auth/logout', {}),
+  me: () => api.get('/api/auth/me')
+};

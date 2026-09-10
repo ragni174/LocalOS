@@ -5,6 +5,10 @@ import { PrismaClient } from '@prisma/client';
 import cookieParser from 'cookie-parser';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { parse, addMinutes, format, isBefore, isEqual } from 'date-fns';
+import { fromZonedTime, toZonedTime, formatInTimeZone } from 'date-fns-tz';
+
+const TIMEZONE = 'Asia/Kolkata';
 
 dotenv.config();
 
@@ -24,15 +28,17 @@ const convertDecimals = (obj) => {
   if (obj === null || typeof obj !== 'object') return obj;
   if (Array.isArray(obj)) return obj.map(convertDecimals);
   
-  if (obj.constructor && obj.constructor.name === 'Decimal') {
-    return Number(obj);
+  if (typeof obj.toNumber === 'function') {
+    return obj.toNumber();
   }
+
+  if (obj instanceof Date) return obj;
   
   const res = {};
   for (const [key, value] of Object.entries(obj)) {
-    if (value && value.constructor && value.constructor.name === 'Decimal') {
-      res[key] = Number(value);
-    } else if (typeof value === 'object') {
+    if (value && typeof value.toNumber === 'function') {
+      res[key] = value.toNumber();
+    } else if (typeof value === 'object' && !(value instanceof Date)) {
       res[key] = convertDecimals(value);
     } else {
       res[key] = value;
@@ -363,6 +369,98 @@ app.put('/api/customers/:id', authMiddleware, authorize(['OWNER', 'MANAGER', 'RE
 // ------------------------------------------------------------------
 // APPOINTMENTS
 // ------------------------------------------------------------------
+app.get('/api/availability', authMiddleware, authorize(['OWNER', 'MANAGER', 'RECEPTIONIST', 'STAFF']), async (req, res) => {
+  try {
+    const { date, serviceId, staffId } = req.query;
+    if (!date || !serviceId) return res.status(400).json({ error: 'Missing date or serviceId' });
+
+    const business = await prisma.business.findUnique({ where: { id: req.business.id } });
+    if (!business) return res.status(404).json({ error: 'Business not found' });
+
+    const service = await prisma.service.findUnique({
+      where: { businessId_id: { businessId: req.business.id, id: serviceId } },
+      include: { staffMembers: true }
+    });
+    if (!service) return res.status(404).json({ error: 'Service not found' });
+
+    let targetStaffIds = [];
+    if (staffId === 'any') {
+      targetStaffIds = service.staffMembers.map(sm => sm.staffId);
+    } else if (staffId) {
+      const isAssigned = service.staffMembers.some(sm => sm.staffId === staffId);
+      if (!isAssigned) return res.json([]);
+      targetStaffIds = [staffId];
+    } else {
+      return res.status(400).json({ error: 'Missing staffId' });
+    }
+
+    if (targetStaffIds.length === 0) return res.json([]);
+
+    const dayOfWeek = new Date(date).toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+    const hours = business.hours[dayOfWeek];
+    if (!hours || hours.isClosed) return res.json([]);
+
+    const dayStartStr = hours.open;
+    const dayEndStr = hours.close;
+
+    const slots = [];
+    let currentSlot = parse(`${date} ${dayStartStr}`, 'yyyy-MM-dd HH:mm', new Date());
+    const dayEnd = parse(`${date} ${dayEndStr}`, 'yyyy-MM-dd HH:mm', new Date());
+
+    const { duration, buffer } = service;
+    const totalDuration = duration + buffer;
+
+    const startOfDayZoned = fromZonedTime(parse(`${date} 00:00`, 'yyyy-MM-dd HH:mm', new Date()), TIMEZONE);
+    const endOfDayZoned = fromZonedTime(parse(`${date} 23:59`, 'yyyy-MM-dd HH:mm', new Date()), TIMEZONE);
+
+    const existingAppointments = await prisma.appointment.findMany({
+      where: {
+        businessId: req.business.id,
+        staffId: { in: targetStaffIds },
+        startTime: { gte: startOfDayZoned },
+        endTime: { lte: endOfDayZoned },
+        status: { notIn: ['CANCELLED', 'NO_SHOW'] }
+      },
+      include: { service: true }
+    });
+
+    const nowZoned = new Date();
+    
+    while (isBefore(addMinutes(currentSlot, duration), dayEnd) || isEqual(addMinutes(currentSlot, duration), dayEnd)) {
+      const currentSlotZoned = fromZonedTime(currentSlot, TIMEZONE);
+      if (isBefore(currentSlotZoned, nowZoned)) {
+        currentSlot = addMinutes(currentSlot, 15);
+        continue;
+      }
+
+      const isAvailable = targetStaffIds.some(sid => {
+        const staffApps = existingAppointments.filter(app => app.staffId === sid);
+        const candidateStart = currentSlotZoned;
+        const candidateEnd = addMinutes(candidateStart, totalDuration);
+
+        const hasOverlap = staffApps.some(app => {
+          const appStart = app.startTime;
+          const appBuffer = app.service?.buffer || 0;
+          const appEndWithBuffer = addMinutes(app.endTime, appBuffer);
+          return candidateStart < appEndWithBuffer && candidateEnd > appStart;
+        });
+
+        return !hasOverlap;
+      });
+
+      if (isAvailable) {
+        slots.push(format(currentSlot, 'hh:mm a'));
+      }
+      
+      currentSlot = addMinutes(currentSlot, 15);
+    }
+
+    res.json(slots);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/appointments', authMiddleware, authorize(['OWNER', 'MANAGER', 'RECEPTIONIST', 'STAFF']), async (req, res) => {
   try {
     const query = {
@@ -381,8 +479,9 @@ app.get('/api/appointments', authMiddleware, authorize(['OWNER', 'MANAGER', 'REC
     const appointments = await prisma.appointment.findMany(query);
     
     const mapped = appointments.map(apt => {
-      const dateStr = apt.startTime.toISOString().split('T')[0];
-      const timeStr = apt.startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' });
+      const zonedStart = toZonedTime(apt.startTime, TIMEZONE);
+      const dateStr = format(zonedStart, 'yyyy-MM-dd');
+      const timeStr = format(zonedStart, 'hh:mm a');
       
       return {
         id: apt.id,
@@ -411,29 +510,90 @@ app.post('/api/appointments', authMiddleware, authorize(['OWNER', 'MANAGER', 'RE
     if (!req.body.serviceId || !req.body.staffId || !req.body.date || !req.body.time) {
       return res.status(400).json({ error: 'Missing required appointment fields' });
     }
-    const startTime = new Date(`${req.body.date}T${req.body.time || '12:00'}:00Z`);
-    if (isNaN(startTime.getTime())) {
+    
+    const service = await prisma.service.findUnique({
+      where: { businessId_id: { businessId: req.business.id, id: req.body.serviceId } },
+      include: { staffMembers: true }
+    });
+    if (!service) return res.status(404).json({ error: 'Service not found' });
+    
+    let targetStaffIds = [];
+    if (req.body.staffId === 'any') {
+      targetStaffIds = service.staffMembers.map(sm => sm.staffId);
+    } else {
+      targetStaffIds = [req.body.staffId];
+    }
+
+    const localDateTimeStr = `${req.body.date} ${req.body.time}`;
+    const parsedTime = parse(localDateTimeStr, 'yyyy-MM-dd hh:mm a', new Date());
+    if (isNaN(parsedTime.getTime())) {
       return res.status(400).json({ error: 'Invalid date/time format' });
     }
-    const endTime = new Date(startTime.getTime() + (req.body.duration || 60) * 60000);
 
-    const apt = await prisma.appointment.create({
-      data: {
-        id: req.body.id || `apt-${Date.now()}`,
-        businessId: req.business.id,
-        customerId: req.body.customerId,
-        serviceId: req.body.serviceId,
-        staffId: req.body.staffId,
-        startTime,
-        endTime,
-        priceAtBooking: req.body.price || 0,
-        durationAtBooking: req.body.duration || 60,
-        status: 'CONFIRMED',
-        notes: req.body.notes
+    const startTime = fromZonedTime(parsedTime, TIMEZONE);
+    const duration = req.body.duration || service.duration;
+    const endTime = addMinutes(startTime, duration);
+    const candidateEnd = addMinutes(startTime, duration + service.buffer);
+
+    const apt = await prisma.$transaction(async (tx) => {
+      let assignedStaffId = null;
+
+      for (const sid of targetStaffIds) {
+        const searchStart = addMinutes(startTime, -120);
+        const searchEnd = candidateEnd;
+
+        const overlaps = await tx.appointment.findMany({
+          where: {
+            businessId: req.business.id,
+            staffId: sid,
+            status: { notIn: ['CANCELLED', 'NO_SHOW'] },
+            startTime: { gte: searchStart },
+            endTime: { lte: searchEnd }
+          },
+          include: { service: true }
+        });
+
+        const hasOverlap = overlaps.some(app => {
+          const appStart = app.startTime;
+          const appBuffer = app.service?.buffer || 0;
+          const appEndWithBuffer = addMinutes(app.endTime, appBuffer);
+          return startTime < appEndWithBuffer && candidateEnd > appStart;
+        });
+
+        if (!hasOverlap) {
+          assignedStaffId = sid;
+          break;
+        }
       }
+
+      if (!assignedStaffId) {
+        throw new Error('SLOT_TAKEN');
+      }
+
+      return await tx.appointment.create({
+        data: {
+          id: req.body.id || `apt-${Date.now()}`,
+          businessId: req.business.id,
+          customerId: req.body.customerId,
+          serviceId: req.body.serviceId,
+          staffId: assignedStaffId,
+          startTime,
+          endTime,
+          priceAtBooking: req.body.price || service.price,
+          durationAtBooking: duration,
+          status: 'CONFIRMED',
+          notes: req.body.notes
+        }
+      });
+    }, {
+      isolationLevel: 'Serializable'
     });
+
     res.status(201).json(convertDecimals(apt));
   } catch (error) {
+    if (error.message === 'SLOT_TAKEN') {
+      return res.status(409).json({ error: 'This time slot is no longer available' });
+    }
     res.status(500).json({ error: error.message });
   }
 });

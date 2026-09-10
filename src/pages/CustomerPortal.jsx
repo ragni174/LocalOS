@@ -14,6 +14,7 @@ import {
   ExternalLink
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
+import { api } from '../api/api';
 
 export default function CustomerPortal() {
   const { business, services, staff, addAppointment } = useApp();
@@ -51,11 +52,27 @@ export default function CustomerPortal() {
   }, [services, selectedCategory]);
 
   // Available Time Slots
-  const timeSlots = [
-    '09:30 AM', '10:15 AM', '11:00 AM', '11:45 AM',
-    '01:00 PM', '01:45 PM', '02:30 PM', '03:15 PM',
-    '04:00 PM', '04:45 PM', '05:30 PM', '06:15 PM'
-  ];
+  const [timeSlots, setTimeSlots] = useState([]);
+  const [isLoadingSlots, setIsLoadingSlots] = useState(false);
+  const [bookingError, setBookingError] = useState(null);
+
+  React.useEffect(() => {
+    if (step === 3 && selectedService && selectedDate) {
+      const fetchSlots = async () => {
+        setIsLoadingSlots(true);
+        try {
+          const res = await api.get(`/api/availability?date=${selectedDate}&serviceId=${selectedService.id}&staffId=${selectedStaff}`);
+          setTimeSlots(res || []);
+        } catch (err) {
+          console.error("Failed to fetch slots", err);
+          setTimeSlots([]);
+        } finally {
+          setIsLoadingSlots(false);
+        }
+      };
+      fetchSlots();
+    }
+  }, [step, selectedDate, selectedService, selectedStaff]);
 
   const handleSelectService = (srv) => {
     setSelectedService(srv);
@@ -72,23 +89,24 @@ export default function CustomerPortal() {
     setStep(4);
   };
 
-  const handleConfirmBooking = (e) => {
+  const handleConfirmBooking = async (e) => {
     e.preventDefault();
     setIsSubmitting(true);
+    setBookingError(null);
 
     const specialist = selectedStaff === 'any' 
       ? staff[0] 
       : staff.find(s => s.id === selectedStaff) || staff[0];
 
-    setTimeout(() => {
-      const newBooking = addAppointment({
+    try {
+      const newBooking = await addAppointment({
         customerName: clientForm.name,
         customerPhone: clientForm.phone,
         customerEmail: clientForm.email,
         serviceName: selectedService.name,
         serviceId: selectedService.id,
         staffName: specialist?.name || 'Any Specialist',
-        staffId: specialist?.id || 'st-any',
+        staffId: selectedStaff, // Send 'any' or real id
         date: selectedDate,
         time: selectedTime,
         duration: selectedService.duration,
@@ -99,7 +117,14 @@ export default function CustomerPortal() {
       setConfirmedBooking(newBooking);
       setIsSubmitting(false);
       setStep(5);
-    }, 800);
+    } catch (err) {
+      console.error(err);
+      setBookingError(err.message || 'Failed to book appointment. The slot might be taken.');
+      setIsSubmitting(false);
+      if (err.message && (err.message.includes('409') || err.message.toLowerCase().includes('taken'))) {
+        setStep(3); // Go back to refresh slots
+      }
+    }
   };
 
   const downloadCalendarFile = () => {
@@ -376,23 +401,34 @@ END:VCALENDAR`;
                 <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-2">
                   Available Slots for {new Date(selectedDate + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
                 </label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                  {timeSlots.map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      onClick={() => handleSelectDateTime(t)}
-                      className={`py-3 px-3 rounded-xl border text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${
-                        selectedTime === t
-                          ? 'bg-emerald-800 text-white border-emerald-800 shadow-sm'
-                          : 'bg-stone-50 border-stone-200 text-stone-800 hover:border-emerald-500 hover:bg-emerald-50/30'
-                      }`}
-                    >
-                      <Clock className="w-3.5 h-3.5 text-stone-400" />
-                      <span>{t}</span>
-                    </button>
-                  ))}
-                </div>
+                {isLoadingSlots ? (
+                  <div className="text-sm text-stone-500 py-4 flex items-center justify-center gap-2">
+                    <div className="w-4 h-4 border-2 border-emerald-600/30 border-t-emerald-600 rounded-full animate-spin" />
+                    Finding available slots...
+                  </div>
+                ) : timeSlots.length > 0 ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                    {timeSlots.map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => handleSelectDateTime(t)}
+                        className={`py-3 px-3 rounded-xl border text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${
+                          selectedTime === t
+                            ? 'bg-emerald-800 text-white border-emerald-800 shadow-sm'
+                            : 'bg-stone-50 border-stone-200 text-stone-800 hover:border-emerald-500 hover:bg-emerald-50/30'
+                        }`}
+                      >
+                        <Clock className="w-3.5 h-3.5 text-stone-400" />
+                        <span>{t}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-sm text-stone-500 py-4 text-center bg-stone-50 rounded-xl border border-stone-200 border-dashed">
+                    No slots available on this date for the selected provider. Try another date or specialist.
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -435,6 +471,13 @@ END:VCALENDAR`;
                 </div>
               </div>
             </div>
+
+            {bookingError && (
+              <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-xl text-sm font-medium mb-4 flex items-start gap-2">
+                <span>⚠️</span>
+                <span>{bookingError}</span>
+              </div>
+            )}
 
             {/* Client Form */}
             <form onSubmit={handleConfirmBooking} className="bg-white p-6 rounded-2xl border border-stone-200 shadow-xs space-y-4">
