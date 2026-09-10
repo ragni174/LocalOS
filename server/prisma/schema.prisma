@@ -1,0 +1,439 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// =============================================================
+// ENUMS
+// =============================================================
+
+enum Role {
+  OWNER
+  MANAGER
+  STAFF
+  RECEPTIONIST
+}
+
+enum AppointmentStatus {
+  CONFIRMED
+  IN_SERVICE
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum CustomerTag {
+  VIP
+  LOYAL
+  NEW
+  AT_RISK
+}
+
+enum OrderStatus {
+  COMPLETED
+  PENDING
+  REFUNDED
+  CANCELLED
+}
+
+enum OrderItemType {
+  SERVICE
+  PRODUCT
+  CUSTOM
+}
+
+enum PaymentMethod {
+  CREDIT_CARD
+  DEBIT_CARD
+  APPLE_PAY
+  CASH
+  GIFT_CARD
+  OTHER
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum InventoryCategory {
+  RETAIL
+  BACKBAR
+  EQUIPMENT
+}
+
+enum NotificationChannel {
+  SMS
+  WHATSAPP
+  SYSTEM
+  EMAIL
+}
+
+enum NotificationStatus {
+  DELIVERED
+  READ
+  UNREAD
+  SENT
+  FAILED
+}
+
+enum Priority {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum IntegrationStatus {
+  CONNECTED
+  DISCONNECTED
+  ERROR
+}
+
+// =============================================================
+// 1. BUSINESS (TENANT ROOT)
+// =============================================================
+
+model Business {
+  id                String   @id @default("biz_default")
+  name              String   @default("Vanilla Spa & Salon")
+  tagline           String   @default("Boutique Wellness, Hair & Aesthetic Care")
+  owner             String   @default("Jane Doe")
+  email             String   @default("hello@vanillasalon.com")
+  phone             String   @default("+1 (555) 382-9912")
+  address           String   @default("142 Orchard Grove Blvd, Suite 200, Seattle, WA")
+  currency          String   @default("$")
+  taxRate           Decimal  @default(0.0850) @db.Decimal(5, 4)
+  depositPercent    Decimal  @default(20.00) @db.Decimal(5, 2)
+  cancellationHours Int      @default(24)
+  hours             Json
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  users          User[]
+  staff          Staff[]
+  services       Service[]
+  customers      Customer[]
+  appointments   Appointment[]
+  inventoryItems InventoryItem[]
+  orders         Order[]
+  payments       Payment[]
+  insights       Insight[]
+  notifications  Notification[]
+  integrations   Integration[]
+}
+
+// =============================================================
+// 2. USERS & OPERATOR ACCOUNTS
+// =============================================================
+
+model User {
+  id           String   @id @default(cuid())
+  businessId   String   @default("biz_default")
+  staffId      String?
+  name         String
+  email        String
+  passwordHash String?
+  pinHash      String?
+  role         Role     @default(OWNER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  staff    Staff?   @relation(fields: [businessId, staffId], references: [businessId, id], onDelete: SetNull)
+
+  @@unique([businessId, email])
+  @@unique([businessId, staffId])
+  @@index([businessId])
+}
+
+// =============================================================
+// 3. STAFF & TEAM MEMBERS
+// =============================================================
+
+model Staff {
+  id         String   @id
+  businessId String   @default("biz_default")
+  name       String
+  role       String   @default("Hair Stylist")
+  email      String
+  phone      String
+  commission Decimal  @default(15.00) @db.Decimal(5, 2)
+  rating     Decimal  @default(5.00) @db.Decimal(3, 2)
+  active     Boolean  @default(true)
+  avatar     String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  business     Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user         User?
+  appointments Appointment[]
+  services     ServiceStaff[]
+
+  @@unique([businessId, id])
+  @@unique([businessId, email])
+  @@index([businessId])
+}
+
+// =============================================================
+// 4. SERVICES CATALOG & STAFF ASSIGNMENTS
+// =============================================================
+
+model Service {
+  id          String   @id
+  businessId  String   @default("biz_default")
+  category    String
+  name        String
+  duration    Int
+  price       Decimal  @db.Decimal(10, 2)
+  buffer      Int      @default(10)
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  business     Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  staffMembers ServiceStaff[]
+  appointments Appointment[]
+  orderItems   OrderItem[]
+
+  @@unique([businessId, id])
+  @@index([businessId])
+}
+
+model ServiceStaff {
+  businessId String @default("biz_default")
+  serviceId  String
+  staffId    String
+
+  service Service @relation(fields: [businessId, serviceId], references: [businessId, id], onDelete: Cascade)
+  staff   Staff   @relation(fields: [businessId, staffId], references: [businessId, id], onDelete: Cascade)
+
+  @@id([serviceId, staffId])
+  @@index([businessId, staffId])
+}
+
+// =============================================================
+// 5. CUSTOMERS / CLIENT DIRECTORY
+// =============================================================
+
+model Customer {
+  id         String      @id
+  businessId String      @default("biz_default")
+  name       String
+  email      String?
+  phone      String
+  visits     Int         @default(0)
+  totalSpend Decimal     @default(0.00) @db.Decimal(10, 2)
+  tag        CustomerTag @default(NEW)
+  lastVisit  DateTime?   @db.Timestamptz
+  notes      String?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  appointments Appointment[]
+  orders       Order[]
+
+  @@unique([businessId, id])
+  @@index([businessId, phone])
+  @@index([businessId, email])
+}
+
+// =============================================================
+// 6. APPOINTMENTS & SCHEDULING
+// =============================================================
+
+model Appointment {
+  id                String            @id
+  businessId        String            @default("biz_default")
+  customerId        String?
+  serviceId         String
+  staffId           String
+  startTime         DateTime          @db.Timestamptz
+  endTime           DateTime          @db.Timestamptz
+  priceAtBooking    Decimal           @db.Decimal(10, 2)
+  durationAtBooking Int
+  status            AppointmentStatus @default(CONFIRMED)
+  notes             String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer Customer? @relation(fields: [businessId, customerId], references: [businessId, id], onDelete: SetNull)
+  service  Service   @relation(fields: [businessId, serviceId], references: [businessId, id], onDelete: Restrict)
+  staff    Staff     @relation(fields: [businessId, staffId], references: [businessId, id], onDelete: Restrict)
+  payments Payment[]
+
+  @@unique([businessId, id])
+  @@index([businessId, startTime])
+  @@index([businessId, staffId, startTime])
+  @@index([businessId, customerId])
+}
+
+// =============================================================
+// 7. INVENTORY MANAGEMENT
+// =============================================================
+
+model InventoryItem {
+  id         String            @id
+  businessId String            @default("biz_default")
+  name       String
+  sku        String
+  category   InventoryCategory @default(RETAIL)
+  stock      Int               @default(0)
+  minStock   Int               @default(5)
+  cost       Decimal           @default(0.00) @db.Decimal(10, 2)
+  price      Decimal           @default(0.00) @db.Decimal(10, 2)
+  supplier   String?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  business   Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  orderItems OrderItem[]
+
+  @@unique([businessId, id])
+  @@unique([businessId, sku])
+  @@index([businessId])
+}
+
+// =============================================================
+// 8. ORDERS & POINT OF SALE (POS)
+// =============================================================
+
+model Order {
+  id           String      @id
+  businessId   String      @default("biz_default")
+  customerId   String?
+  customerName String? // Walk-in fallback
+  subtotal     Decimal     @db.Decimal(10, 2)
+  tax          Decimal     @db.Decimal(10, 2)
+  tip          Decimal     @default(0.00) @db.Decimal(10, 2)
+  total        Decimal     @db.Decimal(10, 2)
+  status       OrderStatus @default(COMPLETED)
+  createdAt    DateTime    @default(now()) @db.Timestamptz
+  updatedAt    DateTime    @updatedAt
+
+  business Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer Customer?   @relation(fields: [businessId, customerId], references: [businessId, id], onDelete: SetNull)
+  items    OrderItem[]
+  payments Payment[]
+
+  @@unique([businessId, id])
+  @@index([businessId, createdAt])
+  @@index([businessId, customerId])
+}
+
+model OrderItem {
+  id              String        @id @default(cuid())
+  businessId      String        @default("biz_default")
+  orderId         String
+  inventoryItemId String?
+  serviceId       String?
+  itemType        OrderItemType @default(CUSTOM)
+  name            String
+  unitPrice       Decimal       @db.Decimal(10, 2)
+  qty             Int           @default(1)
+  subtotal        Decimal       @db.Decimal(10, 2)
+
+  order         Order          @relation(fields: [businessId, orderId], references: [businessId, id], onDelete: Cascade)
+  inventoryItem InventoryItem? @relation(fields: [businessId, inventoryItemId], references: [businessId, id], onDelete: SetNull)
+  service       Service?       @relation(fields: [businessId, serviceId], references: [businessId, id], onDelete: SetNull)
+
+  @@index([businessId, orderId])
+  @@index([businessId, inventoryItemId])
+}
+
+// =============================================================
+// 9. PAYMENTS & TRANSACTIONS
+// =============================================================
+
+model Payment {
+  id            String        @id @default(cuid())
+  businessId    String        @default("biz_default")
+  orderId       String?
+  appointmentId String?
+  amount        Decimal       @db.Decimal(10, 2)
+  tipAmount     Decimal       @default(0.00) @db.Decimal(10, 2)
+  paymentMethod PaymentMethod @default(CREDIT_CARD)
+  status        PaymentStatus @default(COMPLETED)
+  transactionId String?
+  createdAt     DateTime      @default(now()) @db.Timestamptz
+
+  business    Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  order       Order?       @relation(fields: [businessId, orderId], references: [businessId, id], onDelete: Cascade)
+  appointment Appointment? @relation(fields: [businessId, appointmentId], references: [businessId, id], onDelete: SetNull)
+
+  @@index([businessId, createdAt])
+  @@index([businessId, orderId])
+}
+
+// =============================================================
+// 10. AI COPILOT RECOMMENDATIONS & INSIGHTS
+// =============================================================
+
+model Insight {
+  id          String   @id
+  businessId  String   @default("biz_default")
+  title       String
+  category    String
+  impact      String
+  priority    Priority @default(MEDIUM)
+  description String
+  actionText  String
+  isCompleted Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId])
+}
+
+// =============================================================
+// 11. NOTIFICATIONS & ALERTS
+// =============================================================
+
+model Notification {
+  id         String              @id
+  businessId String              @default("biz_default")
+  recipient  String
+  channel    NotificationChannel @default(SMS)
+  type       String
+  message    String
+  status     NotificationStatus  @default(DELIVERED)
+  createdAt  DateTime            @default(now()) @db.Timestamptz
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, createdAt])
+}
+
+// =============================================================
+// 12. INTEGRATIONS & CONNECTORS
+// =============================================================
+
+model Integration {
+  id                   String            @id
+  businessId           String            @default("biz_default")
+  name                 String
+  category             String
+  status               IntegrationStatus @default(CONNECTED)
+  icon                 String
+  description          String
+  lastSync             String            @default("Real-time")
+  keyPreview           String?
+  encryptedCredentials String?
+  config               Json?
+  updatedAt            DateTime          @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, id])
+  @@index([businessId])
+}
