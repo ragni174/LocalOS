@@ -38,11 +38,11 @@ export default function Orders() {
   const [tipPercent, setTipPercent] = useState(18);
   const [customTip, setCustomTip] = useState('');
   
-  // Checkout Modal
   const [isCheckoutModalOpen, setIsCheckoutModalOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('Credit Card');
   const [cashTendered, setCashTendered] = useState('');
   const [completedOrder, setCompletedOrder] = useState(null);
+  const [checkoutError, setCheckoutError] = useState(null);
 
   // Selected Order for Receipt View
   const [viewReceiptOrder, setViewReceiptOrder] = useState(null);
@@ -114,24 +114,29 @@ export default function Orders() {
     : (subtotal * (tipPercent / 100));
   const total = subtotal + tax + tipAmount;
 
-  const handleCompletePayment = (e) => {
+  const handleCompletePayment = async (e) => {
     e.preventDefault();
+    setCheckoutError(null);
     const customer = customers.find(c => c.id === selectedCustomerId);
     const customerName = customer ? customer.name : 'Walk-in Guest';
 
-    const newOrder = createOrder({
-      customerName,
-      items: cart.map(i => ({ name: i.name, price: i.price, qty: i.qty })),
-      subtotal,
-      tax,
-      tip: tipAmount,
-      total,
-      paymentMethod
-    });
+    try {
+      const newOrder = await createOrder({
+        customerName,
+        items: cart.map(i => ({ id: i.id, type: i.type, name: i.name, price: i.price, qty: i.qty })),
+        subtotal,
+        tax,
+        tip: tipAmount,
+        total,
+        paymentMethod
+      });
 
-    setCompletedOrder(newOrder);
-    clearCart();
-    setIsCheckoutModalOpen(false);
+      setCompletedOrder(newOrder);
+      clearCart();
+      setIsCheckoutModalOpen(false);
+    } catch (error) {
+      setCheckoutError(error.response?.data?.error || error.message || 'An error occurred during checkout.');
+    }
   };
 
   return (
@@ -416,8 +421,12 @@ export default function Orders() {
                       ${ord.total.toFixed(2)}
                     </td>
                     <td className="py-3.5 px-4 text-center">
-                      <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800 border border-emerald-200">
-                        {ord.status}
+                      <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${
+                        ord.status === 'REFUNDED'
+                          ? 'bg-rose-100 text-rose-800 border-rose-200'
+                          : 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                      }`}>
+                        {ord.status === 'COMPLETED' ? 'Completed' : ord.status}
                       </span>
                     </td>
                     <td className="py-3.5 px-4 text-right">
@@ -502,6 +511,12 @@ export default function Orders() {
               <span className="text-emerald-700">${total.toFixed(2)}</span>
             </div>
           </div>
+
+          {checkoutError && (
+            <div className="p-3 bg-rose-50 text-rose-700 text-xs font-semibold rounded-lg border border-rose-200">
+              {checkoutError}
+            </div>
+          )}
 
           <div className="pt-3 border-t border-gray-100 flex items-center justify-end gap-2">
             <button

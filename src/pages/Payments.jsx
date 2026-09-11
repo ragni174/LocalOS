@@ -18,11 +18,13 @@ import StatCard from '../components/StatCard';
 import Modal from '../components/Modal';
 
 export default function Payments() {
-  const { orders, business } = useApp();
+  const { orders, business, refundOrder } = useApp();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [payoutSuccess, setPayoutSuccess] = useState(false);
   const [selectedInvoice, setSelectedInvoice] = useState(null);
+  const [refundError, setRefundError] = useState(null);
+  const [isRefunding, setIsRefunding] = useState(false);
 
   const grossRevenue = orders.reduce((sum, o) => sum + (o.total || 0), 0);
   const totalTips = orders.reduce((sum, o) => sum + (o.tip || 0), 0);
@@ -44,6 +46,21 @@ export default function Payments() {
     setPayoutSuccess(true);
     setTimeout(() => setPayoutSuccess(false), 4000);
   };
+
+  const handleRefund = async () => {
+    if (!selectedInvoice) return;
+    setRefundError(null);
+    setIsRefunding(true);
+    try {
+      const updated = await refundOrder(selectedInvoice.id);
+      setSelectedInvoice(updated);
+    } catch (error) {
+      setRefundError(error.response?.data?.error || error.message || 'Refund failed');
+    } finally {
+      setIsRefunding(false);
+    }
+  };
+
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -216,9 +233,15 @@ export default function Payments() {
                     ${ord.total.toFixed(2)}
                   </td>
                   <td className="py-3.5 px-4 text-center">
-                    <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full">
-                      <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Settled
-                    </span>
+                    {ord.status === 'REFUNDED' ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-rose-800 bg-rose-100 px-2 py-0.5 rounded-full">
+                        Refunded
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Settled
+                      </span>
+                    )}
                   </td>
                   <td className="py-3.5 px-4 text-right">
                     <button
@@ -238,7 +261,10 @@ export default function Payments() {
       {/* Invoice Modal */}
       <Modal
         isOpen={!!selectedInvoice}
-        onClose={() => setSelectedInvoice(null)}
+        onClose={() => {
+          setSelectedInvoice(null);
+          setRefundError(null);
+        }}
         title={selectedInvoice ? `Invoice ${selectedInvoice.id}` : ''}
         subtitle={business.name}
         maxWidth="max-w-md"
@@ -293,19 +319,47 @@ export default function Payments() {
               )}
               <div className="flex justify-between font-bold text-sm text-gray-900 pt-1 border-t border-gray-200">
                 <span>Total Settled:</span>
-                <span className="text-emerald-700">${selectedInvoice.total.toFixed(2)}</span>
+                <span className={selectedInvoice.status === 'REFUNDED' ? 'text-gray-500 line-through' : 'text-emerald-700'}>
+                  ${selectedInvoice.total.toFixed(2)}
+                </span>
               </div>
             </div>
 
+            {selectedInvoice.status === 'REFUNDED' && (
+              <div className="p-3 mt-3 bg-rose-50 text-rose-800 text-xs font-semibold rounded-lg border border-rose-200">
+                This order has been fully refunded. Inventory has been restored.
+              </div>
+            )}
+            
+            {refundError && (
+              <div className="p-3 mt-3 bg-rose-50 text-rose-800 text-xs font-semibold rounded-lg border border-rose-200">
+                {refundError}
+              </div>
+            )}
+
             <div className="pt-3 border-t border-gray-100 flex items-center justify-between">
+              <div className="flex gap-2">
+                <button
+                  onClick={() => window.print()}
+                  className="px-4 py-2 text-xs font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center gap-1.5"
+                >
+                  <Download className="w-3.5 h-3.5" /> PDF Receipt
+                </button>
+                {selectedInvoice.status === 'COMPLETED' && (
+                  <button
+                    onClick={handleRefund}
+                    disabled={isRefunding}
+                    className="px-4 py-2 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg disabled:opacity-50"
+                  >
+                    {isRefunding ? 'Refunding...' : 'Refund Order'}
+                  </button>
+                )}
+              </div>
               <button
-                onClick={() => window.print()}
-                className="px-4 py-2 text-xs font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center gap-1.5"
-              >
-                <Download className="w-3.5 h-3.5" /> PDF Receipt
-              </button>
-              <button
-                onClick={() => setSelectedInvoice(null)}
+                onClick={() => {
+                  setSelectedInvoice(null);
+                  setRefundError(null);
+                }}
                 className="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg"
               >
                 Close

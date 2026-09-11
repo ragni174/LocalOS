@@ -140,6 +140,24 @@ export function AppProvider({ children }) {
     }
   };
 
+  const refundOrder = async (id) => {
+    try {
+      const updated = await api.put(`/api/orders/${id}/refund`);
+      
+      const [ordRes, invRes] = await Promise.all([
+        api.get('/api/orders'),
+        api.get('/api/inventory')
+      ]);
+      
+      setOrders(ordRes);
+      setInventory(invRes);
+      return updated;
+    } catch (err) {
+      console.error(err);
+      throw err;
+    }
+  };
+
   const addCustomer = async (cust) => {
     try {
       const created = await api.post('/api/customers', cust);
@@ -285,6 +303,7 @@ export function AppProvider({ children }) {
       addAppointment,
       updateAppointmentStatus,
       createOrder,
+      refundOrder,
       addCustomer,
       updateCustomer,
       addService,

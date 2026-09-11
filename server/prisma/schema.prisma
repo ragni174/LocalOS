@@ -68,6 +68,13 @@ enum InventoryCategory {
   EQUIPMENT
 }
 
+enum InventoryMovementType {
+  SALE
+  RESTOCK
+  REFUND
+  ADJUSTMENT
+}
+
 enum NotificationChannel {
   SMS
   WHATSAPP
@@ -127,6 +134,7 @@ model Business {
   insights       Insight[]
   notifications  Notification[]
   integrations   Integration[]
+  inventoryMovements InventoryMovement[]
 }
 
 // =============================================================
@@ -296,10 +304,29 @@ model InventoryItem {
 
   business   Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
   orderItems OrderItem[]
+  inventoryMovements InventoryMovement[]
 
   @@unique([businessId, id])
   @@unique([businessId, sku])
   @@index([businessId])
+}
+
+model InventoryMovement {
+  id              String                @id @default(cuid())
+  businessId      String                @default("biz_default")
+  inventoryItemId String
+  orderId         String?
+  type            InventoryMovementType
+  quantity        Int
+  reason          String?
+  createdAt       DateTime              @default(now()) @db.Timestamptz
+
+  business      Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  inventoryItem InventoryItem @relation(fields: [businessId, inventoryItemId], references: [businessId, id], onDelete: Cascade)
+  order         Order?        @relation(fields: [businessId, orderId], references: [businessId, id], onDelete: SetNull)
+
+  @@index([businessId, inventoryItemId])
+  @@index([businessId, orderId])
 }
 
 // =============================================================
@@ -323,6 +350,7 @@ model Order {
   customer Customer?   @relation(fields: [businessId, customerId], references: [businessId, id], onDelete: SetNull)
   items    OrderItem[]
   payments Payment[]
+  inventoryMovements InventoryMovement[]
 
   @@unique([businessId, id])
   @@index([businessId, createdAt])

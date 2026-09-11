@@ -667,12 +667,28 @@ app.put('/api/inventory/:id/restock', authMiddleware, authorize(['OWNER', 'MANAG
     if (isNaN(addedQty) || addedQty <= 0) {
       return res.status(400).json({ error: 'Invalid restock quantity' });
     }
-    const inv = await prisma.inventoryItem.update({
-      where: { businessId_id: { businessId: req.business.id, id: req.params.id } },
-      data: {
-        stock: { increment: addedQty }
-      }
-    });
+    
+    const inv = await prisma.$transaction(async (tx) => {
+      const updated = await tx.inventoryItem.update({
+        where: { businessId_id: { businessId: req.business.id, id: req.params.id } },
+        data: {
+          stock: { increment: addedQty }
+        }
+      });
+      
+      await tx.inventoryMovement.create({
+        data: {
+          businessId: req.business.id,
+          inventoryItemId: req.params.id,
+          type: 'RESTOCK',
+          quantity: addedQty,
+          reason: req.body.reason || 'Manual restock'
+        }
+      });
+      
+      return updated;
+    }, { isolationLevel: 'Serializable' });
+
     res.json(convertDecimals(inv));
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -703,7 +719,7 @@ app.get('/api/orders', authMiddleware, authorize(['OWNER', 'MANAGER', 'RECEPTION
       tip: Number(o.tip),
       total: Number(o.total),
       paymentMethod: o.payments.length > 0 ? o.payments[0].paymentMethod.replace('_', ' ') : 'Credit Card',
-      status: o.status === 'COMPLETED' ? 'Completed' : 'Pending',
+      status: o.status === 'COMPLETED' ? 'COMPLETED' : o.status,
       date: o.createdAt.toISOString().split('T')[0],
       time: o.createdAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })
     }));
@@ -719,38 +735,100 @@ app.post('/api/orders', authMiddleware, authorize(['OWNER', 'MANAGER', 'RECEPTIO
     if (!orderData.items || !Array.isArray(orderData.items) || orderData.items.length === 0) {
       return res.status(400).json({ error: 'Order must contain items' });
     }
+    
+    // Validate quantities
+    for (const item of orderData.items) {
+      if (!item.qty || item.qty < 1) {
+        return res.status(400).json({ error: `Invalid quantity for item: ${item.name}` });
+      }
+    }
+    
     const orderId = orderData.id || `ORD-${Date.now()}`;
     
-    const order = await prisma.order.create({
-      data: {
-        id: orderId,
-        businessId: req.business.id,
-        customerName: orderData.customerName,
-        subtotal: orderData.subtotal || 0,
-        tax: orderData.tax || 0,
-        tip: orderData.tip || 0,
-        total: orderData.total || 0,
-        status: 'COMPLETED',
-        items: {
-          create: orderData.items.map(i => ({
-            businessId: req.business.id,
-            name: i.name,
-            unitPrice: i.price,
-            qty: i.qty,
-            subtotal: (i.price * i.qty)
-          }))
-        },
-        payments: {
-          create: [{
-            businessId: req.business.id,
-            amount: orderData.total || 0,
-            paymentMethod: 'CREDIT_CARD',
-            status: 'COMPLETED'
-          }]
+    const order = await prisma.$transaction(async (tx) => {
+      // Step 1: Validate and lock inventory stock for all retail items
+      const productItems = orderData.items.filter(i => i.type === 'Retail' && i.id);
+      for (const item of productItems) {
+        const invItem = await tx.inventoryItem.findUnique({
+          where: { businessId_id: { businessId: req.business.id, id: item.id } }
+        });
+        if (!invItem) {
+          throw new Error(`Inventory item not found: ${item.name}`);
         }
-      },
-      include: { items: true, payments: true }
-    });
+        if (invItem.stock < item.qty) {
+          throw new Error(`Insufficient stock for ${item.name}. Available: ${invItem.stock}`);
+        }
+      }
+
+      // Step 2: Deduct inventory stock
+      for (const item of productItems) {
+        await tx.inventoryItem.update({
+          where: { businessId_id: { businessId: req.business.id, id: item.id } },
+          data: { stock: { decrement: item.qty } }
+        });
+      }
+      
+      let paymentMethod = 'CREDIT_CARD';
+      if (orderData.paymentMethod === 'Apple Pay') paymentMethod = 'APPLE_PAY';
+      if (orderData.paymentMethod === 'Cash') paymentMethod = 'CASH';
+
+      // Step 3: Create the order (with items and payments)
+      const createdOrder = await tx.order.create({
+        data: {
+          id: orderId,
+          businessId: req.business.id,
+          customerName: orderData.customerName,
+          subtotal: orderData.subtotal || 0,
+          tax: orderData.tax || 0,
+          tip: orderData.tip || 0,
+          total: orderData.total || 0,
+          status: 'COMPLETED',
+          items: {
+            create: orderData.items.map(i => {
+              const data = {
+                name: i.name,
+                unitPrice: i.price,
+                qty: i.qty,
+                subtotal: (i.price * i.qty),
+                itemType: 'CUSTOM'
+              };
+              if (i.type === 'Retail' && i.id) {
+                data.itemType = 'PRODUCT';
+                data.inventoryItemId = i.id;
+              } else if (i.type === 'Service' && i.id) {
+                data.itemType = 'SERVICE';
+                data.serviceId = i.id;
+              }
+              return data;
+            })
+          },
+          payments: {
+            create: [{
+              amount: orderData.total || 0,
+              paymentMethod: paymentMethod,
+              status: 'COMPLETED'
+            }]
+          }
+        },
+        include: { items: true, payments: true }
+      });
+
+      // Step 4: Create SALE movement records AFTER order exists (FK requirement)
+      for (const item of productItems) {
+        await tx.inventoryMovement.create({
+          data: {
+            businessId: req.business.id,
+            inventoryItemId: item.id,
+            orderId: createdOrder.id,
+            type: 'SALE',
+            quantity: -item.qty,
+            reason: 'POS Sale'
+          }
+        });
+      }
+      
+      return createdOrder;
+    }, { isolationLevel: 'Serializable' });
     
     res.status(201).json({
       id: order.id,
@@ -760,12 +838,95 @@ app.post('/api/orders', authMiddleware, authorize(['OWNER', 'MANAGER', 'RECEPTIO
       tax: Number(order.tax),
       tip: Number(order.tip),
       total: Number(order.total),
-      paymentMethod: 'Credit Card',
+      paymentMethod: order.payments[0].paymentMethod.replace('_', ' '),
       status: 'Completed',
       date: order.createdAt.toISOString().split('T')[0],
       time: order.createdAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })
     });
   } catch (error) {
+    if (error.message.includes('Insufficient stock')) {
+      return res.status(409).json({ error: error.message });
+    }
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+
+
+app.put('/api/orders/:id/refund', authMiddleware, authorize(['OWNER', 'MANAGER', 'RECEPTIONIST']), async (req, res) => {
+  try {
+    const updatedOrder = await prisma.$transaction(async (tx) => {
+      const order = await tx.order.findUnique({
+        where: { businessId_id: { businessId: req.business.id, id: req.params.id } },
+        include: { items: true, payments: true }
+      });
+      
+      if (!order) {
+        throw new Error('Order not found');
+      }
+      
+      if (order.status === 'REFUNDED') {
+        throw new Error('Order is already refunded');
+      }
+      
+      if (order.status !== 'COMPLETED') {
+        throw new Error(`Cannot refund order in status: ${order.status}`);
+      }
+      
+      const updated = await tx.order.update({
+        where: { businessId_id: { businessId: req.business.id, id: req.params.id } },
+        data: { status: 'REFUNDED' },
+        include: { items: true, payments: true }
+      });
+      
+      for (const payment of order.payments) {
+        await tx.payment.update({
+          where: { id: payment.id },
+          data: { status: 'REFUNDED' }
+        });
+      }
+      
+      for (const item of order.items) {
+        if (item.itemType === 'PRODUCT' && item.inventoryItemId) {
+          await tx.inventoryItem.update({
+            where: { businessId_id: { businessId: req.business.id, id: item.inventoryItemId } },
+            data: { stock: { increment: item.qty } }
+          });
+          
+          await tx.inventoryMovement.create({
+            data: {
+              businessId: req.business.id,
+              inventoryItemId: item.inventoryItemId,
+              orderId: order.id,
+              type: 'REFUND',
+              quantity: item.qty,
+              reason: 'Order Refunded'
+            }
+          });
+        }
+      }
+      
+      return updated;
+    }, { isolationLevel: 'Serializable' });
+    
+    res.json({
+      id: updatedOrder.id,
+      customerName: updatedOrder.customerName,
+      items: updatedOrder.items.map(i => ({ name: i.name, price: Number(i.unitPrice), qty: i.qty })),
+      subtotal: Number(updatedOrder.subtotal),
+      tax: Number(updatedOrder.tax),
+      tip: Number(updatedOrder.tip),
+      total: Number(updatedOrder.total),
+      paymentMethod: updatedOrder.payments.length > 0 ? updatedOrder.payments[0].paymentMethod.replace('_', ' ') : 'Credit Card',
+      status: 'Refunded',
+      date: updatedOrder.createdAt.toISOString().split('T')[0],
+      time: updatedOrder.createdAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })
+    });
+  } catch (error) {
+    if (error.message.includes('already refunded') || error.message.includes('Cannot refund')) {
+      return res.status(400).json({ error: error.message });
+    }
     res.status(500).json({ error: error.message });
   }
 });
